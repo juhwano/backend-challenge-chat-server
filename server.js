@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const Redis = require('ioredis');
@@ -8,8 +7,11 @@ const mongoose = require('mongoose');
 const axios = require('axios');
 const connectDB = require('./config/db');
 const User = require('./models/User');
-const Room = require('./models/Room');
+const Chat = require('./models/Chat');
 const Message = require('./models/Message');
+const Counter = require('./models/Counter');
+const { JSDOM } = require('jsdom');
+const DOMPurify = require('dompurify')(new JSDOM().window);
 
 const app = express();
 const server = http.createServer(app);
@@ -27,14 +29,13 @@ const redisSub = redisClient.duplicate();
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
 connectDB();
 
 redisClient.on('error', (err) => console.error('Redis client error:', err));
 redisSub.on('error', (err) => console.error('Redis subClient error:', err));
 
 const connectedUsers = new Map();
-const userRooms = new Map();
+const userChats = new Map();
 
 app.post('/login', async (req, res) => {
   const { userName } = req.body;
@@ -42,60 +43,116 @@ app.post('/login', async (req, res) => {
   res.json(user);
 });
 
-app.get('/rooms', async (req, res) => {
-  const rooms = await Room.find();
-  res.json(rooms);
+app.post('/logout', async (req, res) => {
+  const { userName } = req.body;
+  try {
+    await User.findOneAndUpdate({ userName }, { active: false });
+    res.json({ message: 'Logout successful' });
+  } catch (error) {
+    console.error('Logout error', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
-app.get('/room/:number', async (req, res) => {
+app.get('/chats', async (req, res) => {
+  const chats = await Chat.find({ deletedAt: null });
+  res.json(chats);
+});
+
+app.get('/chats/:number', async (req, res) => {
   const { number } = req.params;
-  const room = await Room.findOne({ number });
-  res.json(room);
+  const chat = await Chat.findOne({ number });
+  res.json(chat);
 });
 
-async function getNextSequence(roomId) {
-  const room = await Room.findById(roomId);
-  const sequence = room.sequence || 0;
-  room.sequence = sequence + 1;
-  await room.save();
-  return room.sequence;
+app.post('/chats', async (req, res) => {
+  try {
+    const { chatName, isPersonal, owner } = req.body;
+    const ownerUser = await User.findOne({ userName: owner });
+
+    if (!ownerUser) {
+      return res.status(404).json({ message: 'Owner user not found' });
+    }
+
+    const chatObject = await Chat.findOne().sort({ number: -1 });
+    const lastChatNumber = chatObject ? chatObject.number + 1 : 1;
+
+    const chat = new Chat({
+      chatName,
+      number: lastChatNumber,
+      isPersonal,
+      owner: ownerUser._id,
+      users: [ownerUser._id],
+      deletedAt: null
+    });
+
+    await chat.save();
+
+    res.status(201).json(chat);
+  } catch (error) {
+    console.error('Error creating chat room:', error);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+app.get('/messages/:chatId', async (req, res) => {
+  const { chatId } = req.params;
+  try {
+    const messages = await Message.find({ chatId }).sort({ sequence: 1 });
+    res.json(messages);
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+async function getNextSequence(chatId) {
+  const counter = await Counter.findOneAndUpdate({ chatId }, { $inc: { sequence: 1 } }, { new: true, upsert: true });
+  return counter.sequence;
 }
 
 function setUserActive(userName) {
   redisClient.set(`user:${userName}:active`, true);
-  redisClient.expire(`user:${userName}:active`, 60 * 5);
+  redisClient.expire(`user:${userName}:active`, 60 * 60); // 1 hour expiry
 }
 
 function setUserInactive(userName) {
   redisClient.del(`user:${userName}:active`);
 }
 
-app.post('/send-message', async (req, res) => {
-  const { from, to, content, chatType, number } = req.body;
+app.post('/message', async (req, res) => {
+  let { from, to, content, chatType, number } = req.body;
 
   try {
+    content = content.trim();
+    if (!content) {
+      return res.status(400).json({ error: 'Message content cannot be empty' });
+    }
+
+    content = DOMPurify.sanitize(content);
+
     if (content.length > 1000) {
       return res.status(400).json({ error: 'Message too long. Max 1000 characters.' });
     }
 
-    const room = await Room.findOne({ number });
-    if (!room) {
-      return res.status(404).json({ error: 'Room not found' });
+    const chat = await Chat.findOne({ number });
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
     }
 
-    if (chatType === 'group' && io.sockets.adapter.rooms.get(room._id.toString())?.size > 100) {
+    if (chatType === 'group' && io.sockets.adapter.rooms.get(chat._id.toString())?.size > 100) {
       return res.status(400).json({ error: 'Group chat limit reached. Max 100 users.' });
     }
 
-    const sequence = await getNextSequence(room._id);
+    const sequence = await getNextSequence(chat._id);
 
     const fromUser = await User.findOne({ userName: from });
     const toUser = to ? await User.findOne({ userName: to }) : null;
 
     const messageObject = {
-      roomId: room._id,
-      from: fromUser._id,
-      fromUserName: fromUser.userName,
+      chatId: chat._id,
+      from: fromUser ? fromUser._id : null,
+      fromUserName: fromUser ? fromUser.userName : 'System',
       to: toUser ? toUser._id : null,
       toUserName: toUser ? toUser.userName : null,
       content,
@@ -106,15 +163,17 @@ app.post('/send-message', async (req, res) => {
     const chatMessage = new Message(messageObject);
     await chatMessage.save();
 
-    // Broadcast the message to the room
-    io.to(room._id.toString()).emit('newMessage', messageObject);
-
-    // Publish to Redis for other servers
+    io.to(chat._id.toString()).emit('newMessage', messageObject);
     redisPub.publish('chat_messages', JSON.stringify(messageObject));
+
+    if (fromUser) {
+      await User.findOneAndUpdate({ userName: from }, { active: true });
+      setUserActive(from);
+    }
 
     res.status(201).json(messageObject);
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('Error sending message:', error.message);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -122,58 +181,85 @@ app.post('/send-message', async (req, res) => {
 io.on('connection', (socket) => {
   console.log('New client connected');
 
-  socket.on('joinRoom', async ({ number, userName }) => {
-    console.log(`User ${userName} joining room number: ${number}`);
-    const room = await Room.findOne({ number });
-    if (room) {
-      socket.join(room._id.toString());
-      socket.currentRoom = room._id.toString();
-      userRooms.set(userName, room._id.toString());
-      socket.emit('roomJoined', room);
+  socket.on('joinChat', async ({ number, userName }) => {
+    console.log(`User ${userName} joining chat number: ${number}`);
+    const chat = await Chat.findOne({ number });
+    if (chat) {
+      socket.join(chat._id.toString());
+      socket.currentChat = chat._id.toString();
+      socket.userName = userName;
+      userChats.set(userName, chat._id.toString());
+      connectedUsers.set(userName, socket.id);
 
-      const usersInRoom = [...userRooms.entries()]
-        .filter(([_, r]) => r === room._id.toString())
-        .map(([userName]) => ({ userName, socketId: connectedUsers.get(userName) }));
+      const user = await User.findOneAndUpdate({ userName }, { active: true });
+      if (!chat.users.includes(user._id)) {
+        chat.users.push(user._id);
+        await chat.save();
+      }
 
-      io.to(room._id.toString()).emit('newMessage', {
-        content: `${userName} has joined the room.`,
-        timestamp: new Date(),
-        room: room._id.toString()
-      });
+      socket.emit('joinedChat', chat);
 
-      io.to(room._id.toString()).emit('connectedUsers', usersInRoom);
+      const usersInChat = await User.find({ _id: { $in: chat.users } }, 'userName active');
+
+      const systemMessage = {
+        chatId: chat._id,
+        fromUserName: 'System',
+        content: `${userName} has joined the chat.`,
+        sequence: await getNextSequence(chat._id),
+        timestamp: new Date()
+      };
+
+      await new Message(systemMessage).save();
+
+      io.to(chat._id.toString()).emit('newMessage', systemMessage);
+      io.to(chat._id.toString()).emit('connectedUsers', usersInChat);
     } else {
-      socket.emit('error', 'Room not found');
+      socket.emit('error', 'Chat not found');
     }
   });
 
-  socket.on('leaveRoom', async ({ number, userName }) => {
-    console.log(`User ${userName} leaving room number: ${number}`);
-    const room = await Room.findOne({ number });
-    if (room) {
-      socket.leave(room._id.toString());
-      userRooms.delete(userName);
+  socket.on('leaveChat', async ({ number, userName }) => {
+    console.log(`User ${userName} leaving chat number: ${number}`);
+    const chat = await Chat.findOne({ number });
+    if (chat) {
+      socket.leave(chat._id.toString());
+      userChats.delete(userName);
 
-      const usersInRoom = [...userRooms.entries()]
-        .filter(([_, r]) => r === room._id.toString())
-        .map(([userName]) => ({ userName, socketId: connectedUsers.get(userName) }));
+      // Find the user and remove them from the chat's users array
+      const user = await User.findOne({ userName });
+      if (user) {
+        chat.users = chat.users.filter((userId) => !userId.equals(user._id));
+        await chat.save();
+      }
 
-      io.to(room._id.toString()).emit('newMessage', {
-        sender: 'System',
-        content: `${userName} has left the room.`,
-        timestamp: new Date(),
-        room: room._id.toString()
-      });
+      const usersInChat = await User.find({ _id: { $in: chat.users } }, 'userName active');
 
-      io.to(room._id.toString()).emit('connectedUsers', usersInRoom);
+      const systemMessage = {
+        chatId: chat._id,
+        fromUserName: 'System',
+        content: `${userName} has left the chat.`,
+        sequence: await getNextSequence(chat._id),
+        timestamp: new Date()
+      };
+
+      await new Message(systemMessage).save();
+
+      io.to(chat._id.toString()).emit('newMessage', systemMessage);
+      io.to(chat._id.toString()).emit('connectedUsers', usersInChat);
+
+      if (usersInChat.length === 0) {
+        chat.active = false;
+        chat.deletedAt = new Date();
+        await chat.save();
+      }
     } else {
-      socket.emit('error', 'Room not found');
+      socket.emit('error', 'Chat not found');
     }
   });
 
   socket.on('sendMessage', async (data) => {
     try {
-      const response = await axios.post('http://localhost:5050/send-message', data);
+      const response = await axios.post('http://localhost:5050/message', data);
       if (response.status === 201) {
         console.log('Message sent successfully');
       }
@@ -183,34 +269,45 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('requestGroupRooms', async () => {
-    const rooms = await Room.find();
-    socket.emit('groupRoomsList', rooms);
+  socket.on('requestGroupChats', async () => {
+    const chats = await Chat.find();
+    socket.emit('groupChatsList', chats);
   });
 
   socket.on('disconnect', async () => {
     if (socket.userName) {
-      const roomId = userRooms.get(socket.userName);
-      userRooms.delete(socket.userName);
+      const chatId = userChats.get(socket.userName);
+      const chat = await Chat.findById(chatId);
+      if (chat) {
+        const user = await User.findOne({ userName: socket.userName });
+        chat.users.pull(user._id);
+        await chat.save();
 
-      if (roomId) {
-        const usersInRoom = [...userRooms.entries()]
-          .filter(([_, r]) => r === roomId)
-          .map(([userName]) => ({ userName, socketId: connectedUsers.get(userName) }));
+        const usersInChat = await User.find({ _id: { $in: chat.users } }, 'userName active');
 
-        io.to(roomId).emit('newMessage', {
-          sender: 'System',
-          content: `${socket.userName} has left the room.`,
-          timestamp: new Date(),
-          room: roomId
-        });
+        const systemMessage = {
+          chatId: chat._id,
+          fromUserName: 'System',
+          content: `${socket.userName} has left the chat.`,
+          sequence: await getNextSequence(chat._id),
+          timestamp: new Date()
+        };
 
-        io.to(roomId).emit('connectedUsers', usersInRoom);
+        await new Message(systemMessage).save();
+
+        io.to(chat._id.toString()).emit('newMessage', systemMessage);
+        io.to(chat._id.toString()).emit('connectedUsers', usersInChat);
+
+        if (usersInChat.length === 0) {
+          chat.deletedAt = new Date();
+          await chat.save();
+        }
       }
 
+      userChats.delete(socket.userName);
       connectedUsers.delete(socket.userName);
       await User.findOneAndUpdate({ userName: socket.userName }, { active: false });
-      io.emit('userStatus', { userName: socket.userName, status: 'offline' });
+      io.emit('userStatus', { userName: socket.userName, active: false });
     }
     console.log('Client disconnected');
   });
@@ -225,7 +322,7 @@ redisSub.on('message', (channel, message) => {
       io.to(receiverSocketId).emit('newMessage', parsedMessage);
     }
   } else if (parsedMessage.chatType === 'group') {
-    io.to(parsedMessage.roomId).emit('newMessage', parsedMessage);
+    io.to(parsedMessage.chatId).emit('newMessage', parsedMessage);
   }
 });
 

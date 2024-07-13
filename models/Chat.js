@@ -1,11 +1,12 @@
 const mongoose = require('mongoose');
 
-const roomSchema = new mongoose.Schema(
+const chatSchema = new mongoose.Schema(
   {
-    roomName: { type: String, unique: true, required: true },
+    chatName: { type: String, unique: true, required: true },
     number: { type: Number, unique: true, required: true },
-    active: { type: Boolean, default: false },
+    active: { type: Boolean, default: true },
     isPersonal: { type: Boolean, default: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     users: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     deletedAt: { type: Date, default: null }
   },
@@ -22,6 +23,6 @@ const roomSchema = new mongoose.Schema(
   }
 );
 
-const Room = mongoose.model('Room', roomSchema);
+const Chat = mongoose.model('Chat', chatSchema);
 
-module.exports = Room;
+module.exports = Chat;
