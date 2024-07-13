@@ -54,9 +54,24 @@ app.post('/logout', async (req, res) => {
   }
 });
 
+app.get('/users', async (req, res) => {
+  try {
+    const users = await User.find({ active: true }, 'userName');
+    res.json(users.map((user) => user.userName));
+  } catch (error) {
+    console.error('Error fetching users', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 app.get('/chats', async (req, res) => {
-  const chats = await Chat.find({ deletedAt: null });
-  res.json(chats);
+  try {
+    const chats = await Chat.find({ deletedAt: null }).populate('owner', 'userName');
+    res.json(chats);
+  } catch (error) {
+    console.error('Error fetching chats', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
 app.get('/chats/:number', async (req, res) => {
@@ -67,28 +82,66 @@ app.get('/chats/:number', async (req, res) => {
 
 app.post('/chats', async (req, res) => {
   try {
-    const { chatName, isPersonal, owner } = req.body;
+    const { chatName, isPersonal, owner, user } = req.body;
     const ownerUser = await User.findOne({ userName: owner });
 
     if (!ownerUser) {
       return res.status(404).json({ message: 'Owner user not found' });
     }
 
-    const chatObject = await Chat.findOne().sort({ number: -1 });
-    const lastChatNumber = chatObject ? chatObject.number + 1 : 1;
+    if (isPersonal) {
+      const targetUser = await User.findOne({ userName: user });
+      if (!targetUser) {
+        return res.status(404).json({ message: 'Target user not found' });
+      }
 
-    const chat = new Chat({
-      chatName,
-      number: lastChatNumber,
-      isPersonal,
-      owner: ownerUser._id,
-      users: [ownerUser._id],
-      deletedAt: null
-    });
+      let chat = await Chat.findOne({
+        isPersonal: true,
+        users: { $all: [ownerUser._id, targetUser._id] }
+      });
 
-    await chat.save();
+      if (chat) {
+        return res.json(chat);
+      }
 
-    res.status(201).json(chat);
+      const chatObject = await Chat.findOne().sort({ number: -1 });
+      const lastChatNumber = chatObject ? chatObject.number + 1 : 1;
+
+      chat = new Chat({
+        chatName: `${targetUser.userName}`,
+        number: lastChatNumber,
+        isPersonal,
+        owner: ownerUser._id,
+        users: [ownerUser._id, targetUser._id],
+        deletedAt: null
+      });
+
+      await chat.save();
+
+      // Notify the target user about the new 1:1 chat
+      const targetSocketId = connectedUsers.get(targetUser.userName);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('new1to1chat', chat);
+      }
+
+      res.status(201).json(chat);
+    } else {
+      const chatObject = await Chat.findOne().sort({ number: -1 });
+      const lastChatNumber = chatObject ? chatObject.number + 1 : 1;
+
+      const chat = new Chat({
+        chatName,
+        number: lastChatNumber,
+        isPersonal,
+        owner: ownerUser._id,
+        users: [ownerUser._id],
+        deletedAt: null
+      });
+
+      await chat.save();
+
+      res.status(201).json(chat);
+    }
   } catch (error) {
     console.error('Error creating chat room:', error);
     res.status(500).json({ message: 'Internal Server Error' });
@@ -180,6 +233,11 @@ app.post('/message', async (req, res) => {
 
 io.on('connection', (socket) => {
   console.log('New client connected');
+
+  socket.on('register', (userName) => {
+    connectedUsers.set(userName, socket.id);
+    console.log(`User ${userName} connected with socket ID: ${socket.id}`);
+  });
 
   socket.on('joinChat', async ({ number, userName }) => {
     console.log(`User ${userName} joining chat number: ${number}`);
