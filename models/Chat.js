@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const chatSchema = new mongoose.Schema(
   {
-    chatName: { type: String, unique: true, required: true },
+    chatName: { type: String, required: true },
     number: { type: Number, unique: true, required: true },
     active: { type: Boolean, default: true },
     isPersonal: { type: Boolean, default: true },
