@@ -62,28 +62,32 @@ io.on('connection', (socket) => {
   console.log('New client socket_id connected: ', socket.userName);
 
   socket.on('joinRoom', async ({ chatId, number, userId, userName }) => {
-    // 채팅방 넘버 입장
+    // Check if the user is already in the chat's user list
+    const chat = await Chat.findById(chatId);
+
+    if (!chat.users.includes(userId)) {
+      // Add user to chat's user array if not already present
+      await Chat.findByIdAndUpdate(chatId, { $addToSet: { users: userId } });
+
+      const systemMessage = {
+        chatId,
+        fromUserName: 'system',
+        toUserName: `${userName}`,
+        content: `입장`,
+        chatNumber: number
+      };
+      io.to(number).emit('message', systemMessage);
+    }
+
     socket.join(number);
     console.log(`Client joined room: ${number}`);
-    // Add user to chat's user array
-    await Chat.findByIdAndUpdate(chatId, { $addToSet: { users: userId } });
-
-    const systemMessage = {
-      chatId,
-      fromUserName: 'system',
-      toUserName: `${userName}`,
-      content: `입장`,
-      chatNumber: number
-    };
-    // const chat = new Chat({ chatName, isPersonal, owner, users, number: nextNumber });
-    io.to(number).emit('message', systemMessage);
   });
 
   socket.on('leaveRoom', async ({ chatId, number, userId, userName }) => {
     socket.leave(number);
     console.log(`Client with username ${userName} left room: ${number}`);
     // Remove user from chat's user array
-    await Chat.findByIdAndUpdate(chatId, { $pull: { users: userId } });
+    const chat = await Chat.findByIdAndUpdate(chatId, { $pull: { users: userId } }, { new: true });
 
     const systemMessage = {
       chatId: '',
@@ -93,6 +97,11 @@ io.on('connection', (socket) => {
       chatNumber: number
     };
     io.to(number).emit('message', systemMessage);
+
+    if (chat.users.length === 0) {
+      await Chat.findByIdAndUpdate(chat._id, { active: false, deletedAt: new Date() });
+      console.log(`Removed empty room: ${number}`);
+    }
   });
 
   socket.on('sendMessage', (message) => {
@@ -137,14 +146,46 @@ app.get('/users', async (req, res) => {
   res.json(users);
 });
 
+app.get('/users/search', async (req, res) => {
+  const { query } = req.query;
+  const users = await User.find({ userName: new RegExp(query, 'i') }, 'userName active');
+  res.json(users);
+});
+
 app.get('/chats', async (req, res) => {
-  const chats = await Chat.find().populate('owner', 'userName');
-  res.json(chats);
+  try {
+    const chats = await Chat.find({ isPersonal: false, active: true }).populate('owner', 'userName').sort({ _id: -1 }); // Sort by creation date in descending order
+    res.json(chats);
+  } catch (error) {
+    console.error('Error fetching group chats:', error);
+    res.status(500).json({ error: 'Error fetching group chats' });
+  }
 });
 
 app.get('/chats/:number', async (req, res) => {
   const { number } = req.params;
-  const chats = await Chat.findOne({ number }, '_id');
+  const chats = await Chat.findOne({ number }, '_id, users');
+  res.json(chats);
+});
+
+// Fetch 1:1 chats for a specific user
+app.get('/chats/one-to-one/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const chats = await Chat.find({ isPersonal: true, users: { $in: [userId] } })
+      .populate('owner', 'userName')
+      .sort({ _id: -1 }); // Sort by creation date in descending order
+    res.json(chats);
+  } catch (error) {
+    console.error('Error fetching 1:1 chats:', error);
+    res.status(500).json({ error: 'Error fetching 1:1 chats' });
+  }
+});
+
+// Fetch group chats for a specific user
+app.get('/chats/group/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const chats = await Chat.find({ isPersonal: false, users: userId }).populate('owner', 'userName');
   res.json(chats);
 });
 
@@ -155,18 +196,58 @@ app.get('/messages/:chatId', async (req, res) => {
 });
 
 app.post('/chats', async (req, res) => {
-  const { chatName, isPersonal, owner } = req.body;
+  const { chatName, isPersonal, owner, users } = req.body;
+  console.log('owner, users: ', owner, users);
+  let chat;
 
-  // Find the highest chat number and increment it
-  const latestChatNumber = await Chat.findOne().sort({ number: -1 }).exec();
-  const nextNumber = latestChatNumber ? latestChatNumber.number + 1 : 1;
+  try {
+    // Find the highest chat number and increment it
+    const latestChatNumber = await Chat.findOne().sort({ number: -1 }).exec();
+    const nextNumber = latestChatNumber ? latestChatNumber.number + 1 : 1;
 
-  const chat = new Chat({ chatName, isPersonal, owner, number: nextNumber });
-  const counter = new Counter({ chatId: chat._id });
+    if (isPersonal) {
+      // Check for an existing chat
+      chat = await Chat.findOne({ isPersonal: true, users: { $all: [...users] } });
 
-  await chat.save();
-  await counter.save();
-  res.json(chat);
+      if (chat) {
+        // Reactivate the chat if it was marked as deleted
+        if (chat.deletedAt !== null) {
+          chat.deletedAt = null;
+          chat.active = true;
+          await chat.save();
+          return res.json(chat);
+        } else {
+          return res.json(chat);
+        }
+      }
+
+      // Create a new chat if no existing chat is found
+      chat = new Chat({ chatName, isPersonal, owner, users: [...users], number: nextNumber });
+    } else {
+      chat = new Chat({ chatName, isPersonal, owner, number: nextNumber });
+    }
+
+    const counter = new Counter({ chatId: chat._id });
+
+    await chat.save();
+    await counter.save();
+    res.json(chat);
+  } catch (error) {
+    if (error.code === 11000) {
+      chat = await Chat.findOne({ chatName });
+      if (chat) {
+        if (chat.deletedAt !== null) {
+          chat.deletedAt = null;
+          chat.active = true;
+          chat.users = [...users];
+          await chat.save();
+        }
+        return res.json(chat);
+      }
+    }
+    console.error('Error creating chat:', error);
+    res.status(500).json({ error: 'An error occurred while creating the chat.' });
+  }
 });
 
 async function getNextSequence(chatId) {
