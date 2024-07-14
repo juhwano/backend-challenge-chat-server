@@ -39,9 +39,11 @@ amqp
     ch.consume('chat_messages', async (msg) => {
       if (msg !== null) {
         const messageContent = JSON.parse(msg.content.toString());
-        console.log('MongoDB save messageContent: ', messageContent);
-
+        if (messageContent.to) {
+          messageContent.toUserName = await getToUserName(messageContent.to);
+        }
         messageContent.sequence = await getNextSequence(messageContent.chatId);
+        console.log('MongoDB save messageContent: ', messageContent);
 
         const newMessage = new Message(messageContent);
         await newMessage.save();
@@ -164,7 +166,7 @@ app.get('/chats', async (req, res) => {
 
 app.get('/chats/:number', async (req, res) => {
   const { number } = req.params;
-  const chats = await Chat.findOne({ number }, '_id, users');
+  const chats = await Chat.findOne({ number, active: true }, '_id, users isPersonal chatName');
   res.json(chats);
 });
 
@@ -255,7 +257,10 @@ async function getNextSequence(chatId) {
   return counter.sequence;
 }
 
-async function addUserChatRoom(userId) {}
+async function getToUserName(toUserId) {
+  const user = await User.findById(toUserId);
+  return user ? user.userName : 'Unknown';
+}
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
