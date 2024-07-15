@@ -17,7 +17,7 @@ chat-server/
 │   ├── messageRoutes.js
 │   └── userRoutes.js
 ├── services/
-│  └── messageService.js
+│   └── messageService.js
 ├── .env
 ├── Dockerfile
 ├── package.json
