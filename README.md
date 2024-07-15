@@ -1,6 +1,6 @@
 # 폴더 구조
 ```bash
-chat-backend/
+chat-server/
 ├── config/
 │   └── db.js
 ├── controllers/
