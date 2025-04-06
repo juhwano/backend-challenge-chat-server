@@ -1,4 +1,4 @@
-# 기술 과제 - 채팅 시스템 개발
+# 기술 과제 - 채팅 서버 개발
 ## 목차
 - [개발 환경](#개발-환경)
 - [빌드 및 실행하기](#빌드-및-실행하기)
@@ -25,11 +25,11 @@
 - Infra
     - AWS EC2
     - PM 2
+    - Docker
 - 라이브러리 및 도구
     - Socket.IO (v4.7.5)
     - Redis (ioredis v5.4.1)
     - RabbitMQ (amqplib v0.10.4)
-    - Docker
     - Mongoose (v8.5.1)
 
 <br/><br/>
