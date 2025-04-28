@@ -6,7 +6,6 @@
 - [데이터 모델링](#데이터-모델링)
 - [흐름도](#흐름도)
 - [아키텍쳐](#아키텍처)
-- [폴더 구조](#폴더-구조)
 - [주요 기능](#주요-기능)
 - [API](#api)
 
@@ -86,34 +85,6 @@ npm start
 
 ## 아키텍처
 ![architecture](https://github.com/user-attachments/assets/98a07b08-4a90-4fad-b376-dc655f27a898)
-
-<br/><br/>
-
-## 폴더 구조
-```bash
-chat-server/
-├── config/                      # 설정 관련 파일
-│   └── db.js                    # 데이터베이스 연결 설정
-├── controllers/                 # 컨트롤러 - 요청 처리 및 응답 반환
-│   ├── chatController.js        # 채팅방 생성, 조회 기능
-│   ├── messageController.js     # 메시지 조회 기능
-│   └── userController.js        # 사용자 로그인/로그아웃, 검색 기능
-├── models/                      # 데이터 모델 - 데이터베이스 스키마 정의
-│   ├── Chat.js                  # 채팅방 정보 관리
-│   ├── Counter.js               # 메시지 순서 관리
-│   ├── Message.js               # 메시지 정보 관리
-│   └── User.js                  # 사용자 정보 관리
-├── routes/                      # 라우트 - API 엔드포인트 정의
-│   ├── chatRoutes.js            # 채팅방 관련 API 경로
-│   ├── messageRoutes.js         # 메시지 관련 API 경로
-│   └── userRoutes.js            # 사용자 관련 API 경로
-├── services/                    # 서비스 - 비즈니스 로직 처리
-│   └── messageService.js        # 메시지 관련 유틸리티 함수
-├── .env                         # 환경 변수 설정 파일
-├── Dockerfile                   # Docker 이미지 빌드 설정
-├── package.json                 # 프로젝트 메타데이터 및 의존성 정보
-└── server.js                    # 애플리케이션 진입점
-```
 
 <br/><br/>
 
